@@ -31,13 +31,11 @@
 // XHR, you may also just use the net/http.DefaultTransport, which
 // GopherJS replaces with an XHR-enabled version, making this package
 // useless most of the time.
-package xhr // import "honnef.co/go/js/xhr"
+package xhr
 
 import (
 	"errors"
-
-	"github.com/gopherjs/gopherjs/js"
-	"honnef.co/go/js/util"
+	"syscall/js"
 )
 
 // The possible values of Request.ReadyState.
@@ -73,34 +71,51 @@ const (
 //   req.Send([]byte("data"))
 //   b := js.Global.Get("Uint8Array").New(req.Response).Interface().([]byte)
 type Request struct {
-	*js.Object
-	util.EventTarget
-	ReadyState      int        `js:"readyState"`
-	Response        *js.Object `js:"response"`
-	ResponseText    string     `js:"responseText"`
-	ResponseType    string     `js:"responseType"`
-	ResponseXML     *js.Object `js:"responseXML"`
-	Status          int        `js:"status"`
-	StatusText      string     `js:"statusText"`
-	Timeout         int        `js:"timeout"`
-	WithCredentials bool       `js:"withCredentials"`
-
+	js.Value
+	//WithCredentials bool       `js:"withCredentials"`
 	ch chan error
 }
 
-// Upload wraps XMLHttpRequestUpload objects.
-type Upload struct {
-	*js.Object
-	util.EventTarget
+func (r *Request) SetTimeout(timeout int) {
+	r.Set("timeout ", timeout)
 }
+
+func (r *Request) GetResponse() js.Value {
+	return r.Get("response")
+}
+
+func (r *Request) GetResponseText() string {
+	return r.Get("responseText").String()
+}
+
+func (r *Request) GetResponseBytes() []byte {
+	resp := js.Global().Get("Uint8Array").New(r.GetResponse())
+	data := make([]byte, resp.Length())
+	js.CopyBytesToGo(data, resp)
+	return data
+}
+
+func (r *Request) GetStatus() int {
+	return r.Get("status").Int()
+}
+
+func (r *Request) GetStatusText() string {
+	return r.Get("statusText").String()
+}
+
+// Upload wraps XMLHttpRequestUpload objects.
+//type Upload struct {
+//	*js.Object
+//	util.EventTarget
+//}
 
 // Upload returns the XMLHttpRequestUpload object associated with the
 // request. It can be used to register events for tracking the
 // progress of uploads.
-func (r *Request) Upload() *Upload {
-	o := r.Get("upload")
-	return &Upload{o, util.EventTarget{Object: o}}
-}
+//func (r *Request) Upload() *Upload {
+//	o := r.Get("upload")
+//	return &Upload{o, util.EventTarget{Object: o}}
+//}
 
 // ErrAborted is the error returned by Send when a request was
 // aborted.
@@ -120,10 +135,17 @@ var ErrFailure = errors.New("send failed")
 // NewRequest creates a new XMLHttpRequest object, which may be used
 // for a single request.
 func NewRequest(method, url string) *Request {
-	o := js.Global.Get("XMLHttpRequest").New()
-	r := &Request{Object: o, EventTarget: util.EventTarget{Object: o}}
-	r.Call("open", method, url, true)
+	value := js.Global().Get("XMLHttpRequest").New()
+	// async = true
+	value.Call("open", method, url, true)
+	r := &Request{
+		Value: value,
+	}
 	return r
+}
+
+func (r *Request) SetResponseType(respType string) {
+	r.Set("responseType", respType)
 }
 
 // ResponseHeaders returns all response headers.
@@ -134,30 +156,27 @@ func (r *Request) ResponseHeaders() string {
 // ResponseHeader returns the value of the specified header.
 func (r *Request) ResponseHeader(name string) string {
 	value := r.Call("getResponseHeader", name)
-	if value == nil {
-		return ""
-	}
 	return value.String()
 }
 
 // Abort will abort the request. The corresponding Send will return
 // ErrAborted, unless the request has already succeeded.
-func (r *Request) Abort() {
-	if r.ch == nil {
-		return
-	}
-
-	r.Call("abort")
-	select {
-	case r.ch <- ErrAborted:
-	default:
-	}
-}
+//func (r *Request) Abort() {
+//	if r.ch == nil {
+//		return
+//	}
+//
+//	r.Call("abort")
+//	select {
+//	case r.ch <- ErrAborted:
+//	default:
+//	}
+//}
 
 // OverrideMimeType overrides the MIME type returned by the server.
-func (r *Request) OverrideMimeType(mimetype string) {
-	r.Call("overrideMimeType", mimetype)
-}
+//func (r *Request) OverrideMimeType(mimetype string) {
+//	r.Call("overrideMimeType", mimetype)
+//}
 
 // Send sends the request that was prepared with Open. The data
 // argument is optional and can either be a string or []byte payload,
@@ -174,19 +193,34 @@ func (r *Request) Send(data interface{}) error {
 		panic("must not use a Request for multiple requests")
 	}
 	r.ch = make(chan error, 1)
-	r.AddEventListener("load", false, func(*js.Object) {
+	r.addEventListener("load", false, func() {
 		go func() { r.ch <- nil }()
 	})
-	r.AddEventListener("error", false, func(o *js.Object) {
+
+	r.addEventListener("error", false, func() {
 		go func() { r.ch <- ErrFailure }()
 	})
-	r.AddEventListener("timeout", false, func(*js.Object) {
+	r.addEventListener("timeout", false, func() {
 		go func() { r.ch <- ErrTimeout }()
 	})
 
 	r.Call("send", data)
 	val := <-r.ch
 	return val
+}
+
+func (r *Request) SendBytes(p []byte) error {
+	arr := js.Global().Get("Uint8Array").New(len(p))
+	js.CopyBytesToJS(arr, p)
+	return r.Send(arr)
+}
+
+func (r *Request) addEventListener(typ string, useCapture bool, listener func()) {
+	r.Call("addEventListener", typ, js.FuncOf(
+		func(this js.Value, args []js.Value) interface{} {
+			listener()
+			return nil
+		}), useCapture)
 }
 
 // SetRequestHeader sets a header of the request.
@@ -203,12 +237,12 @@ func (r *Request) SetRequestHeader(header, value string) {
 // Only errors of the network layer are treated as errors. HTTP status
 // codes 4xx and 5xx are not treated as errors. In order to check
 // status codes, use NewRequest instead.
-func Send(method, url string, data []byte) ([]byte, error) {
-	xhr := NewRequest(method, url)
-	xhr.ResponseType = ArrayBuffer
-	err := xhr.Send(data)
-	if err != nil {
-		return nil, err
-	}
-	return js.Global.Get("Uint8Array").New(xhr.Response).Interface().([]byte), nil
-}
+//func Send(method, url string, data []byte) ([]byte, error) {
+//	xhr := NewRequest(method, url)
+//	xhr.ResponseType = ArrayBuffer
+//	err := xhr.Send(data)
+//	if err != nil {
+//		return nil, err
+//	}
+//	return js.Global.Get("Uint8Array").New(xhr.Response).Interface().([]byte), nil
+//}
