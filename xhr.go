@@ -193,19 +193,24 @@ func (r *Request) Send(data interface{}) error {
 		panic("must not use a Request for multiple requests")
 	}
 	r.ch = make(chan error, 1)
+	funcs := make([]js.Func, 0, 3)
 	r.addEventListener("load", false, func() {
 		go func() { r.ch <- nil }()
-	})
+	}, &funcs)
 
 	r.addEventListener("error", false, func() {
 		go func() { r.ch <- ErrFailure }()
-	})
+	}, &funcs)
 	r.addEventListener("timeout", false, func() {
 		go func() { r.ch <- ErrTimeout }()
-	})
+	}, &funcs)
 
 	r.Call("send", data)
 	val := <-r.ch
+
+	for _, fn := range funcs {
+		fn.Release()
+	}
 	return val
 }
 
@@ -215,12 +220,14 @@ func (r *Request) SendBytes(p []byte) error {
 	return r.Send(arr)
 }
 
-func (r *Request) addEventListener(typ string, useCapture bool, listener func()) {
-	r.Call("addEventListener", typ, js.FuncOf(
+func (r *Request) addEventListener(typ string, useCapture bool, listener func(), funcs *[]js.Func) {
+	fn := js.FuncOf(
 		func(this js.Value, args []js.Value) interface{} {
 			listener()
 			return nil
-		}), useCapture)
+		})
+	r.Call("addEventListener", typ, fn, useCapture)
+	*funcs = append(*funcs, fn)
 }
 
 // SetRequestHeader sets a header of the request.
